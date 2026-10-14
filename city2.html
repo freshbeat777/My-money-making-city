@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My City</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #1c2430;
+    overflow: hidden;
+    font-family: system-ui, -apple-system, Roboto, Arial, sans-serif;
+    color: #f2f4f7;
+  }
+  canvas { display: block; touch-action: none; }
+  #info {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    padding: 10px 12px;
+    font-size: 15px;
+    background: rgba(0, 0, 0, 0.45);
+    pointer-events: none;
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="info">My City - building the ground...</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+
+/* =====================  SETTINGS YOU CAN CHANGE  =====================
+   FIELD   : width and depth of the city ground (1 unit = 1 meter)
+   TILES   : blocks per side. 4 means 4 x 4 = 16 blocks.
+             (fewer blocks = faster on your phone, but each block is stretched more)
+   FLATTEN : how tall the bumps are. 1 = original, 0.25 = gentle, 0.05 = almost flat
+======================================================================= */
+const FIELD = 200;
+const TILES = 4;
+const FLATTEN = 0.25;
+const GROUND_FILE = 'ground-v1.glb';
+
+const infoEl = document.getElementById('info');
+
+// ---- Scene basics ----
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x9fb6cc);
+scene.fog = new THREE.Fog(0x9fb6cc, 400, 1200);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.5, 3000);
+camera.position.set(0, 150, 200);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI * 0.48; // stops the camera going under the ground
+controls.minDistance = 5;
+controls.maxDistance = 700;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f99, 1.5));
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+sun.position.set(120, 220, 90);
+scene.add(sun);
+
+// ---- Loaders (the model uses Draco compression) ----
+const draco = new DRACOLoader();
+draco.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/libs/draco/');
+const loader = new GLTFLoader();
+loader.setDRACOLoader(draco);
+
+// Average color of the ground picture, used for the base layer under everything
+function averageColor(texture) {
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = 16;
+    canvas.height = 16;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(texture.image, 0, 0, 16, 16);
+    const data = ctx.getImageData(0, 0, 16, 16).data;
+    let r = 0, g = 0, b = 0;
+    const n = data.length / 4;
+    for (let i = 0; i < data.length; i += 4) {
+      r += data[i]; g += data[i + 1]; b += data[i + 2];
+    }
+    return new THREE.Color().setRGB(r / n / 255, g / n / 255, b / n / 255, THREE.SRGBColorSpace);
+  } catch (e) {
+    return new THREE.Color(0x7a6f5e);
+  }
+}
+
+try {
+  // ---- Load the light ground block ----
+  const gltf = await loader.loadAsync(GROUND_FILE);
+  let source = null;
+  gltf.scene.traverse(o => { if (o.isMesh && !source) source = o; });
+  if (!source) throw new Error('No ground mesh found in ' + GROUND_FILE);
+
+  // This model's "up" is its own z axis, so turn it to point up (y)
+  const geo = source.geometry.clone();
+  geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position;
+  const nor = geo.attributes.normal;
+
+  // Average height of the top surface (so the top sits at height 0)
+  let sum = 0, count = 0;
+  for (let i = 0; i < pos.count; i++) {
+    if (nor && nor.getY(i) > 0.5) { sum += pos.getY(i); count++; }
+  }
+  geo.computeBoundingBox();
+  const topMean = count > 0 ? sum / count : (geo.boundingBox.max.y + geo.boundingBox.min.y) / 2;
+
+  // The block is a square that sits turned on its side in the file.
+  // Try many turn angles and keep the one that fits it in the smallest box.
+  const STEP = 8;
+  let bestAngle = 0, bestArea = Infinity;
+  for (let deg = 0; deg < 90; deg += 0.5) {
+    const a = deg * Math.PI / 180;
+    const c = Math.cos(a), s = Math.sin(a);
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (let i = 0; i < pos.count; i += STEP) {
+      const x = pos.getX(i), z = pos.getZ(i);
+      const xr = x * c - z * s;
+      const zr = x * s + z * c;
+      if (xr < minX) minX = xr;
+      if (xr > maxX) maxX = xr;
+      if (zr < minZ) minZ = zr;
+      if (zr > maxZ) maxZ = zr;
+    }
+    const area = (maxX - minX) * (maxZ - minZ);
+    if (area < bestArea) { bestArea = area; bestAngle = a; }
+  }
+
+  // Turn every point by that angle and measure the real size of the block
+  const ca = Math.cos(bestAngle), sa = Math.sin(bestAngle);
+  const rx = new Float32Array(pos.count);
+  const rz = new Float32Array(pos.count);
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), z = pos.getZ(i);
+    rx[i] = x * ca - z * sa;
+    rz[i] = x * sa + z * ca;
+    if (rx[i] < minX) minX = rx[i];
+    if (rx[i] > maxX) maxX = rx[i];
+    if (rz[i] < minZ) minZ = rz[i];
+    if (rz[i] > maxZ) maxZ = rz[i];
+  }
+  const blockW = maxX - minX;
+  const blockD = maxZ - minZ;
+  const cx = (maxX + minX) / 2;
+  const cz = (maxZ + minZ) / 2;
+
+  // Stretch each block so TILES blocks fit the field exactly, and flatten the bumps
+  const tileSize = FIELD / TILES;
+  const sx = tileSize / blockW;
+  const sz = tileSize / blockD;
+  for (let i = 0; i < pos.count; i++) {
+    pos.setXYZ(
+      i,
+      (rx[i] - cx) * sx,
+      (pos.getY(i) - topMean) * FLATTEN,
+      (rz[i] - cz) * sz
+    );
+  }
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+  geo.computeBoundingBox();
+  geo.computeBoundingSphere();
+
+  const material = source.material;
+  material.roughness = 1;
+  material.metalness = 0;
+
+  // ---- Base layer: fills any gap, so there is never a hole ----
+  const baseMaterial = new THREE.MeshStandardMaterial({
+    color: averageColor(material.map || { image: null }),
+    roughness: 1,
+    metalness: 0
+  });
+  const base = new THREE.Mesh(new THREE.PlaneGeometry(FIELD, FIELD), baseMaterial);
+  base.rotation.x = -Math.PI / 2;
+  base.position.y = -0.25;
+  scene.add(base);
+
+  // ---- Lay the blocks. Every second one is flipped like a mirror so edges match ----
+  for (let ix = 0; ix < TILES; ix++) {
+    for (let iz = 0; iz < TILES; iz++) {
+      const tile = new THREE.Mesh(geo, material);
+      tile.position.set(
+        -FIELD / 2 + (ix + 0.5) * tileSize,
+        0,
+        -FIELD / 2 + (iz + 0.5) * tileSize
+      );
+      tile.scale.set(ix % 2 === 0 ? 1 : -1, 1, iz % 2 === 0 ? 1 : -1);
+      scene.add(tile);
+    }
+  }
+
+  infoEl.textContent = 'My City - ground ' + FIELD + ' x ' + FIELD + ' (' + TILES + ' x ' + TILES +
+    ' blocks, each real block ' + blockW.toFixed(0) + ' x ' + blockD.toFixed(0) +
+    ' stretched to ' + tileSize.toFixed(0) + '). Drag to turn, pinch to zoom.';
+} catch (err) {
+  console.error(err);
+  infoEl.textContent = 'Could not build the ground: ' + err.message;
+}
+
+// ---- Keep it sharp when the screen changes ----
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+renderer.setAnimationLoop(() => {
+  controls.update();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
