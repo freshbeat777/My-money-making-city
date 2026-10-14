@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My City</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #1c2430;
+    overflow: hidden;
+    font-family: system-ui, -apple-system, Roboto, Arial, sans-serif;
+    color: #f2f4f7;
+  }
+  canvas { display: block; touch-action: none; }
+  #info {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    padding: 10px 12px;
+    font-size: 15px;
+    background: rgba(0, 0, 0, 0.45);
+    pointer-events: none;
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="info">My City - loading the ground...</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+
+/* =====================  SETTINGS YOU CAN CHANGE  =====================
+   FLATTEN: how tall the bumps of the ground are.
+            1    = original bumpy ground
+            0.25 = gentle bumps (current)
+            0.05 = almost flat
+======================================================================= */
+const FLATTEN = 0.25;
+const GROUND_FILE = 'ground_small.glb';
+
+const infoEl = document.getElementById('info');
+
+// ---- Scene basics ----
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x9fb6cc);
+scene.fog = new THREE.Fog(0x9fb6cc, 150, 500);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 2000);
+camera.position.set(0, 55, 85);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI * 0.48; // stops the camera going under the ground
+controls.minDistance = 5;
+controls.maxDistance = 300;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f99, 1.5));
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+sun.position.set(80, 140, 60);
+scene.add(sun);
+
+// ---- Loaders (the model uses Draco compression) ----
+const draco = new DRACOLoader();
+draco.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/libs/draco/');
+const loader = new GLTFLoader();
+loader.setDRACOLoader(draco);
+
+// ---- Load the ground ----
+try {
+  const gltf = await loader.loadAsync(GROUND_FILE);
+  const ground = new THREE.Group();
+  ground.add(gltf.scene);
+
+  // Center it, then flatten the bumps
+  let box = new THREE.Box3().setFromObject(gltf.scene);
+  const center = box.getCenter(new THREE.Vector3());
+  gltf.scene.position.set(-center.x, 0, -center.z);
+  ground.scale.y = FLATTEN;
+  ground.updateMatrixWorld(true);
+
+  // Find the surface height in the middle and make that height = 0
+  const ray = new THREE.Raycaster(new THREE.Vector3(0, 100, 0), new THREE.Vector3(0, -1, 0));
+  const hit = ray.intersectObject(ground, true)[0];
+  ground.position.y = hit ? -hit.point.y : -box.max.y * FLATTEN;
+  scene.add(ground);
+
+  box = new THREE.Box3().setFromObject(ground);
+  const size = box.getSize(new THREE.Vector3());
+  infoEl.textContent = 'My City - ground ' + size.x.toFixed(0) + ' x ' + size.z.toFixed(0) +
+    '. Drag to turn, pinch to zoom.';
+} catch (err) {
+  console.error(err);
+  infoEl.textContent = 'Could not load ' + GROUND_FILE + '. Is it in the same folder as index.html?';
+}
+
+// ---- Keep it sharp when the screen changes ----
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+renderer.setAnimationLoop(() => {
+  controls.update();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
