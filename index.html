@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My City - Ground Preview</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #1c2430;
+    overflow: hidden;
+    font-family: system-ui, -apple-system, Roboto, Arial, sans-serif;
+    color: #f2f4f7;
+  }
+  canvas { display: block; touch-action: none; }
+  #info {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    padding: 10px 12px;
+    font-size: 15px;
+    line-height: 1.35;
+    background: rgba(0, 0, 0, 0.5);
+    pointer-events: none;
+  }
+  #bar {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+    padding: 10px;
+    background: rgba(0, 0, 0, 0.5);
+  }
+  #bar button {
+    font: inherit;
+    font-size: 15px;
+    padding: 10px 14px;
+    border: 1px solid #5b6b82;
+    border-radius: 8px;
+    background: #2a3646;
+    color: #f2f4f7;
+  }
+  #bar button.active {
+    background: #d9a441;
+    border-color: #d9a441;
+    color: #1c2430;
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="info">Loading the four grounds...</div>
+<div id="bar"></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+
+const infoEl = document.getElementById('info');
+const barEl = document.getElementById('bar');
+
+// The four ground files (they must be in the same folder as this page)
+const ITEMS = [
+  { label: 'rocky_ground',     file: 'rocky_ground-v1.glb' },
+  { label: 'stone_ground_01',  file: 'stone_ground_01-v1.glb' },
+  { label: 'ground_small',     file: 'ground_small.glb' },
+  { label: 'destroyed_ground', file: 'destroyed_ground-v1.glb' }
+];
+const GAP = 12; // empty space between the grounds
+
+// ---- Scene basics ----
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1c2430);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 5000);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI * 0.495; // stops the camera going under the ground
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x556070, 1.4));
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+sun.position.set(80, 140, 60);
+scene.add(sun);
+
+// A faint grid: each square is 10 units, so you can feel the real size
+const grid = new THREE.GridHelper(1000, 100, 0x3d4b60, 0x2b3748);
+grid.position.y = -0.02;
+scene.add(grid);
+
+// ---- Loaders (the models use Draco compression) ----
+const draco = new DRACOLoader();
+draco.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/libs/draco/');
+const loader = new GLTFLoader();
+loader.setDRACOLoader(draco);
+
+// ---- Camera helper ----
+function focusOn(box) {
+  const c = box.getCenter(new THREE.Vector3());
+  const s = box.getSize(new THREE.Vector3());
+  const r = Math.max(s.x, s.y, s.z);
+  controls.target.copy(c);
+  camera.position.set(c.x, c.y + r * 0.8, c.z + r * 1.3);
+  camera.near = Math.max(r / 200, 0.01);
+  camera.far = r * 60;
+  camera.updateProjectionMatrix();
+  controls.update();
+}
+
+// ---- Load everything ----
+const placed = [];   // { label, box, size }
+let cursor = 0;
+const problems = [];
+
+for (const item of ITEMS) {
+  try {
+    const gltf = await loader.loadAsync(item.file);
+    const holder = new THREE.Group();
+    holder.add(gltf.scene);
+
+    // Sit the model on the floor, centered on its own middle
+    let box = new THREE.Box3().setFromObject(gltf.scene);
+    const center = box.getCenter(new THREE.Vector3());
+    gltf.scene.position.set(-center.x, -box.min.y, -center.z);
+
+    holder.updateMatrixWorld(true);
+    box = new THREE.Box3().setFromObject(holder);
+    const size = box.getSize(new THREE.Vector3());
+
+    // Put it in the row, left to right
+    holder.position.x = cursor + size.x / 2;
+    cursor += size.x + GAP;
+    scene.add(holder);
+
+    holder.updateMatrixWorld(true);
+    box = new THREE.Box3().setFromObject(holder);
+    placed.push({ label: item.label, box, size });
+  } catch (err) {
+    console.error(item.file, err);
+    problems.push(item.file);
+  }
+}
+
+// ---- Buttons ----
+function describe(p) {
+  return p.label + ': ' + p.size.x.toFixed(1) + ' x ' + p.size.z.toFixed(1) +
+    ' wide, ' + p.size.y.toFixed(1) + ' tall';
+}
+
+function addButton(text, box, message) {
+  const b = document.createElement('button');
+  b.textContent = text;
+  b.addEventListener('click', () => {
+    focusOn(box);
+    infoEl.textContent = message;
+    for (const other of barEl.children) other.classList.remove('active');
+    b.classList.add('active');
+  });
+  barEl.appendChild(b);
+  return b;
+}
+
+if (placed.length > 0) {
+  const all = new THREE.Box3();
+  placed.forEach(p => all.union(p.box));
+  const allBtn = addButton('All', all, 'All grounds at true scale. Drag to turn, pinch to zoom.');
+  placed.forEach(p => addButton(p.label, p.box, describe(p)));
+  allBtn.click();
+  if (problems.length) {
+    infoEl.textContent += '  (Could not load: ' + problems.join(', ') + ')';
+  }
+} else {
+  infoEl.textContent = 'No ground loaded. Check that the .glb files are in the same folder as index.html.';
+}
+
+// ---- Keep it sharp when the screen changes ----
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+renderer.setAnimationLoop(() => {
+  controls.update();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
