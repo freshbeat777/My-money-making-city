@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My City</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #1c2430;
+    overflow: hidden;
+    font-family: system-ui, -apple-system, Roboto, Arial, sans-serif;
+    color: #f2f4f7;
+  }
+  canvas { display: block; touch-action: none; }
+  #info {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    padding: 10px 12px;
+    font-size: 15px;
+    background: rgba(0, 0, 0, 0.45);
+    pointer-events: none;
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="info">My City - building the ground...</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+
+/* =====================  SETTINGS YOU CAN CHANGE  =====================
+   FIELD   : width and depth of the city ground (1 unit = 1 meter)
+   TILES   : blocks per side. 4 means 4 x 4 = 16 blocks.
+   FLATTEN : how tall the bumps are. 1 = original, 0.25 = gentle, 0.05 = almost flat
+   STONE_FILE : model whose picture becomes the stone ground
+   STONE_SIZE : meters covered by one copy of the stone picture
+   HOUSE_FILE : the house model
+   HOUSE_SCALE: 1 = original size, 0.5 = half, 2 = double
+   HOUSE_X / HOUSE_Z : where the house sits (0, 0 = middle of the city)
+   HOUSE_LIFT : how high above the ground (stops flickering)
+   PLATE_MATERIALS : parts of the house file that get the stone (by material name)
+======================================================================= */
+const FIELD = 200;
+const TILES = 4;
+const FLATTEN = 0.25;
+const GROUND_FILE = 'ground-v1.glb';
+const STONE_FILE = 'stone_ground_01-v1.glb';
+const STONE_SIZE = 12;
+const HOUSE_FILE = 'minimalist_house_scene_architecture_design-v1.glb';
+const HOUSE_SCALE = 1;
+const HOUSE_X = 0;
+const HOUSE_Z = 0;
+const HOUSE_LIFT = 0.3;
+const PLATE_MATERIALS = ['Ground'];
+
+const infoEl = document.getElementById('info');
+
+// ---- Scene basics ----
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x9fb6cc);
+scene.fog = new THREE.Fog(0x9fb6cc, 400, 1200);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.5, 3000);
+camera.position.set(0, 150, 200);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI * 0.48;
+controls.minDistance = 5;
+controls.maxDistance = 700;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f99, 1.5));
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+sun.position.set(120, 220, 90);
+scene.add(sun);
+
+// Start drawing right away, so the ground shows while the house is still loading
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+renderer.setAnimationLoop(() => {
+  controls.update();
+  renderer.render(scene, camera);
+});
+
+// ---- Loaders (the models use Draco compression) ----
+const draco = new DRACOLoader();
+draco.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/libs/draco/');
+const loader = new GLTFLoader();
+loader.setDRACOLoader(draco);
+
+// Average color of the ground picture (only used if the stone picture fails)
+function averageColor(texture) {
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = 16;
+    canvas.height = 16;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(texture.image, 0, 0, 16, 16);
+    const data = ctx.getImageData(0, 0, 16, 16).data;
+    let r = 0, g = 0, b = 0;
+    const n = data.length / 4;
+    for (let i = 0; i < data.length; i += 4) {
+      r += data[i]; g += data[i + 1]; b += data[i + 2];
+    }
+    return new THREE.Color().setRGB(r / n / 255, g / n / 255, b / n / 255, THREE.SRGBColorSpace);
+  } catch (e) {
+    return new THREE.Color(0x7a6f5e);
+  }
+}
+
+let groundText = '';
+let stoneCanvas = null; // the clean stone square, reused for the house plate
+
+try {
+  // ---- Load the light ground block ----
+  const gltf = await loader.loadAsync(GROUND_FILE);
+  let source = null;
+  gltf.scene.traverse(o => { if (o.isMesh && !source) source = o; });
+  if (!source) throw new Error('No ground mesh found in ' + GROUND_FILE);
+
+  const geo = source.geometry.clone();
+  geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position;
+  const nor = geo.attributes.normal;
+
+  let sum = 0, count = 0;
+  for (let i = 0; i < pos.count; i++) {
+    if (nor && nor.getY(i) > 0.5) { sum += pos.getY(i); count++; }
+  }
+  geo.computeBoundingBox();
+  const topMean = count > 0 ? sum / count : (geo.boundingBox.max.y + geo.boundingBox.min.y) / 2;
+
+  const STEP = 8;
+  let bestAngle = 0, bestArea = Infinity;
+  for (let deg = 0; deg < 90; deg += 0.5) {
+    const a = deg * Math.PI / 180;
+    const c = Math.cos(a), s = Math.sin(a);
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (let i = 0; i < pos.count; i += STEP) {
+      const x = pos.getX(i), z = pos.getZ(i);
+      const xr = x * c - z * s;
+      const zr = x * s + z * c;
+      if (xr < minX) minX = xr;
+      if (xr > maxX) maxX = xr;
+      if (zr < minZ) minZ = zr;
+      if (zr > maxZ) maxZ = zr;
+    }
+    const area = (maxX - minX) * (maxZ - minZ);
+    if (area < bestArea) { bestArea = area; bestAngle = a; }
+  }
+
+  const ca = Math.cos(bestAngle), sa = Math.sin(bestAngle);
+  const rx = new Float32Array(pos.count);
+  const rz = new Float32Array(pos.count);
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), z = pos.getZ(i);
+    rx[i] = x * ca - z * sa;
+    rz[i] = x * sa + z * ca;
+    if (rx[i] < minX) minX = rx[i];
+    if (rx[i] > maxX) maxX = rx[i];
+    if (rz[i] < minZ) minZ = rz[i];
+    if (rz[i] > maxZ) maxZ = rz[i];
+  }
+  const blockW = maxX - minX;
+  const blockD = maxZ - minZ;
+  const cx = (maxX + minX) / 2;
+  const cz = (maxZ + minZ) / 2;
+
+  const tileSize = FIELD / TILES;
+  const sx = tileSize / blockW;
+  const sz = tileSize / blockD;
+  for (let i = 0; i < pos.count; i++) {
+    pos.setXYZ(
+      i,
+      (rx[i] - cx) * sx,
+      (pos.getY(i) - topMean) * FLATTEN,
+      (rz[i] - cz) * sz
+    );
+  }
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+  geo.computeBoundingBox();
+  geo.computeBoundingSphere();
+
+  const material = source.material;
+  material.roughness = 1;
+  material.metalness = 0;
+
+  // ---- Base layer: stone picture (one clean square, mirrored so seams hide) ----
+  let baseMaterial;
+  try {
+    const stoneGltf = await loader.loadAsync(STONE_FILE);
+    let stoneMap = null;
+    stoneGltf.scene.traverse(o => {
+      if (o.isMesh) {
+        if (!stoneMap && o.material && o.material.map) stoneMap = o.material.map;
+        o.geometry.dispose();
+      }
+    });
+    if (!stoneMap) throw new Error('No picture found in ' + STONE_FILE);
+    // The picture is a patchwork sheet. Cut out the clean top-left square.
+    stoneCanvas = document.createElement('canvas');
+    stoneCanvas.width = 512;
+    stoneCanvas.height = 512;
+    stoneCanvas.getContext('2d').drawImage(stoneMap.image, 6, 6, 500, 500, 0, 0, 512, 512);
+    const stoneTex = new THREE.CanvasTexture(stoneCanvas);
+    stoneTex.colorSpace = THREE.SRGBColorSpace;
+    stoneTex.wrapS = THREE.MirroredRepeatWrapping;
+    stoneTex.wrapT = THREE.MirroredRepeatWrapping;
+    stoneTex.repeat.set(FIELD / STONE_SIZE, FIELD / STONE_SIZE);
+    stoneTex.anisotropy = 4;
+    baseMaterial = new THREE.MeshStandardMaterial({ map: stoneTex, roughness: 1, metalness: 0 });
+  } catch (e) {
+    console.error('Stone picture failed, using plain color', e);
+    baseMaterial = new THREE.MeshStandardMaterial({
+      color: averageColor(material.map || { image: null }),
+      roughness: 1,
+      metalness: 0
+    });
+  }
+  const base = new THREE.Mesh(new THREE.PlaneGeometry(FIELD, FIELD), baseMaterial);
+  base.rotation.x = -Math.PI / 2;
+  base.position.y = -0.25;
+  scene.add(base);
+
+  // ---- Lay the blocks. Every second one is flipped like a mirror so edges match ----
+  for (let ix = 0; ix < TILES; ix++) {
+    for (let iz = 0; iz < TILES; iz++) {
+      const tile = new THREE.Mesh(geo, material);
+      tile.position.set(
+        -FIELD / 2 + (ix + 0.5) * tileSize,
+        0,
+        -FIELD / 2 + (iz + 0.5) * tileSize
+      );
+      tile.scale.set(ix % 2 === 0 ? 1 : -1, 1, iz % 2 === 0 ? 1 : -1);
+      scene.add(tile);
+    }
+  }
+
+  groundText = 'Ground ' + FIELD + ' x ' + FIELD + ' + stone base.';
+  infoEl.textContent = 'My City - ' + groundText + ' Loading house (22 MB)...';
+} catch (err) {
+  console.error(err);
+  infoEl.textContent = 'Could not build the ground: ' + err.message;
+}
+
+// ---- The house, in the middle ----
+try {
+  const houseGltf = await loader.loadAsync(HOUSE_FILE);
+  const house = houseGltf.scene;
+  house.scale.setScalar(HOUSE_SCALE);
+  house.position.set(HOUSE_X, HOUSE_LIFT, HOUSE_Z);
+  scene.add(house);
+  house.updateMatrixWorld(true);
+
+  // Swap the house's own black ground plate for the stone picture
+  let swapped = 0;
+  if (stoneCanvas) {
+    house.traverse(o => {
+      if (o.isMesh && o.material && PLATE_MATERIALS.includes(o.material.name)) {
+        const b = new THREE.Box3().setFromObject(o);
+        const s = b.getSize(new THREE.Vector3());
+        const t = new THREE.CanvasTexture(stoneCanvas);
+        t.colorSpace = THREE.SRGBColorSpace;
+        t.wrapS = THREE.MirroredRepeatWrapping;
+        t.wrapT = THREE.MirroredRepeatWrapping;
+        t.repeat.set(Math.max(1, s.x / STONE_SIZE), Math.max(1, s.z / STONE_SIZE));
+        t.anisotropy = 4;
+        o.material = new THREE.MeshStandardMaterial({ map: t, roughness: 1, metalness: 0 });
+        swapped++;
+      }
+    });
+  }
+
+  const box = new THREE.Box3().setFromObject(house);
+  const size = box.getSize(new THREE.Vector3());
+  const mid = box.getCenter(new THREE.Vector3());
+  infoEl.textContent = 'My City - ' + groundText + ' House size ' +
+    size.x.toFixed(0) + ' x ' + size.y.toFixed(0) + ' x ' + size.z.toFixed(0) +
+    ', centre ' + mid.x.toFixed(0) + ', ' + mid.z.toFixed(0) +
+    '. Stone plate swapped: ' + swapped + '.';
+} catch (err) {
+  console.error(err);
+  infoEl.textContent = 'My City - ' + groundText + ' House failed: ' + err.message;
+}
+</script>
+</body>
+</html>
